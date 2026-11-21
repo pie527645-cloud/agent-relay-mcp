@@ -130,5 +130,6 @@ export interface RelayStoreOptions {
   baseDir?: string;
   lockTimeoutMs?: number;
   lockStaleMs?: number;
+  caseInsensitivePaths?: boolean;
   now?: () => number;
 }

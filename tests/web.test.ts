@@ -267,4 +267,54 @@ describe('local web dashboard security and reply handling', () => {
     assert.equal(parsed.question.status, 'answered');
     assert.equal(parsed.question.answer, 'Confirmed: test on Node 20 and Node 22.');
   });
+
+  it('flushes a clean HTTP 413 response on oversized POST /reply payloads without ECONNRESET', async () => {
+    const baseDir = await makeTempDir('agent-relay-web-413-');
+    const store = new RelayStore({ baseDir });
+    const q = await store.askHumanAsync({
+      sender: 'agent-large',
+      question: 'Upload summary?'
+    });
+
+    const web = await startRelayWebServer({ store, port: 0 });
+    runningServers.push(web);
+
+    const oversizedForm = `questionId=${encodeURIComponent(q.questionId)}&answer=${'A'.repeat(80 * 1024)}`;
+    const form413 = await rawHttpRequest({
+      port: web.port,
+      method: 'POST',
+      path: '/reply',
+      headers: {
+        Host: `127.0.0.1:${web.port}`,
+        Origin: `http://127.0.0.1:${web.port}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': String(Buffer.byteLength(oversizedForm))
+      },
+      body: oversizedForm
+    });
+    assert.equal(form413.statusCode, 413);
+    assert.match(form413.body, /413/);
+
+    const oversizedJson = JSON.stringify({
+      questionId: q.questionId,
+      answer: 'B'.repeat(80 * 1024)
+    });
+    const json413 = await rawHttpRequest({
+      port: web.port,
+      method: 'POST',
+      path: '/reply',
+      headers: {
+        Host: `127.0.0.1:${web.port}`,
+        Origin: `http://127.0.0.1:${web.port}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        'Content-Length': String(Buffer.byteLength(oversizedJson))
+      },
+      body: oversizedJson
+    });
+    assert.equal(json413.statusCode, 413);
+
+    const stillPending = await store.checkHumanReply({ questionId: q.questionId });
+    assert.equal(stillPending.status, 'pending');
+  });
 });

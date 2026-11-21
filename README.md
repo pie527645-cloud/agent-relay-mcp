@@ -193,7 +193,7 @@ node ./dist/cli.js web --port 4317
 ## Security and Concurrency Design
 
 - **Cross-Process Atomic State:** State mutations acquire an exclusive `'wx'` (`O_CREAT | O_EXCL`) lockfile per resource with jittered retry backoff and automatic stale/dead-PID lock eviction, then write to a process-unique temporary file, `datasync` to disk, and atomically rename into place.
-- **Strict Input & Path Sanitization:** Channel names are restricted to `[a-zA-Z0-9_-]{1,64}`. File lease keys normalize slashes and reject parent directory traversal (`..`), null/control characters, UNC paths, and NTFS alternate data stream colons.
+- **Strict Input & Path Sanitization:** Channel names are restricted to `[a-zA-Z0-9_-]{1,64}`. File lease keys use null-prototype lookup maps, normalize slashes (plus case-insensitive key matching on Windows and macOS), and reject parent directory traversal (`..`), null/control characters, UNC paths, and NTFS alternate data stream colons.
 - **Localhost-Only Web UI Hardening:** `agent-relay web` binds strictly to `127.0.0.1` (never `0.0.0.0`), validates `Host` (`127.0.0.1:<port>`, `localhost:<port>`, `[::1]:<port>`), `Origin`, `Referer`, and `Sec-Fetch-Site` headers (returning HTTP `403 Forbidden` on untrusted values to block DNS rebinding and cross-site form submissions), applies a strict `Content-Security-Policy` (`default-src 'none'`), and HTML-escapes all rendered text against XSS.
 
 ---

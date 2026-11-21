@@ -5,11 +5,13 @@ export { NotFoundError, RelayStore, ValidationError } from './store/relayStore.j
 export {
   DEFAULT_LEASE_TTL_SECONDS,
   DEFAULT_READ_LIMIT,
+  isCaseInsensitivePlatform,
   MAX_LEASE_TTL_SECONDS,
   MAX_READ_LIMIT,
   normalizeLeasePath,
   resolveRelayDir,
-  sanitizeChannelName
+  sanitizeChannelName,
+  toLeaseLookupKey
 } from './store/sanitize.js';
 export type * from './types.js';
 export { escapeHtml } from './web/escapeHtml.js';

@@ -9,6 +9,7 @@ import {
   normalizeLeasePath,
   resolveRelayDir,
   sanitizeChannelName,
+  toLeaseLookupKey,
   ValidationError
 } from '../src/index.js';
 import { validateTtlSeconds } from '../src/store/sanitize.js';
@@ -43,6 +44,8 @@ describe('sanitize and path normalization', () => {
     assert.equal(normalizeLeasePath('./src\\store//relayStore.ts'), 'src/store/relayStore.ts');
     assert.equal(normalizeLeasePath('/workspace/project/./app.ts'), '/workspace/project/app.ts');
     assert.equal(normalizeLeasePath('c:\\repo\\src\\main.ts'), 'C:/repo/src/main.ts');
+    assert.equal(toLeaseLookupKey('src/FooBar.ts', true), 'src/foobar.ts');
+    assert.equal(toLeaseLookupKey('src/FooBar.ts', false), 'src/FooBar.ts');
   });
 
   it('blocks parent directory traversal, control chars, UNC paths, and invalid colons', () => {

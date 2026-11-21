@@ -195,4 +195,82 @@ describe('RelayStore channels, cooperative leases, and async human inbox', () =>
       NotFoundError
     );
   });
+
+  it('handles Object.prototype property names cleanly in file leases without prototype collisions', async () => {
+    const baseDir = await makeTempDir('agent-relay-proto-');
+    const store = new RelayStore({ baseDir });
+    const protoKeys = ['constructor', 'toString', '__proto__', 'hasOwnProperty'];
+
+    for (const key of protoKeys) {
+      const acquired = await store.acquireFileLease({
+        path: key,
+        owner: 'owner-a',
+        ttlSeconds: 120
+      });
+      assert.equal(acquired.acquired, true, `Failed to acquire "${key}"`);
+      assert.equal(acquired.renewed, false);
+      assert.equal(acquired.holder, 'owner-a');
+
+      const conflict = await store.acquireFileLease({
+        path: key,
+        owner: 'owner-b',
+        ttlSeconds: 120
+      });
+      assert.equal(conflict.acquired, false, `Expected conflict on "${key}"`);
+      assert.equal(conflict.holder, 'owner-a');
+    }
+
+    // Reload via fresh RelayStore instance to verify disk serialization & deserialization of "__proto__"
+    const reloadedStore = new RelayStore({ baseDir });
+    const listed = await reloadedStore.listActiveLeases();
+    assert.equal(listed.length, protoKeys.length);
+
+    for (const key of protoKeys) {
+      const released = await reloadedStore.releaseFileLease({
+        path: key,
+        owner: 'owner-a'
+      });
+      assert.equal(released.released, true, `Failed to release "${key}"`);
+      assert.equal(released.alreadyExpiredOrMissing, false);
+    }
+
+    const afterRelease = await reloadedStore.listActiveLeases();
+    assert.equal(afterRelease.length, 0);
+  });
+
+  it('shares lease locks across casing variants when caseInsensitivePaths is enabled', async () => {
+    const baseDir = await makeTempDir('agent-relay-case-');
+    const ciStore = new RelayStore({ baseDir, caseInsensitivePaths: true });
+
+    const first = await ciStore.acquireFileLease({
+      path: 'src/FooComponent.ts',
+      owner: 'agent-1',
+      ttlSeconds: 120
+    });
+    assert.equal(first.acquired, true);
+    assert.equal(first.path, 'src/FooComponent.ts');
+
+    const conflict = await ciStore.acquireFileLease({
+      path: 'src/foocomponent.ts',
+      owner: 'agent-2',
+      ttlSeconds: 120
+    });
+    assert.equal(conflict.acquired, false);
+    assert.equal(conflict.holder, 'agent-1');
+
+    const renewed = await ciStore.acquireFileLease({
+      path: 'SRC/FOOCOMPONENT.TS',
+      owner: 'agent-1',
+      ttlSeconds: 180
+    });
+    assert.equal(renewed.acquired, true);
+    assert.equal(renewed.renewed, true);
+
+    const released = await ciStore.releaseFileLease({
+      path: 'src/foocomponent.ts',
+      owner: 'agent-1'
+    });
+    assert.equal(released.released, true);
+    assert.equal(released.alreadyExpiredOrMissing, false);
+  });
 });

@@ -6,6 +6,7 @@ import { escapeHtml } from './escapeHtml.js';
 
 export const DEFAULT_WEB_PORT = 4317;
 const MAX_BODY_BYTES = 64 * 1024;
+const HARD_DRAIN_CAP_BYTES = 8 * 1024 * 1024;
 
 export interface StartWebServerOptions {
   store: RelayStore;
@@ -86,11 +87,25 @@ function validateLocalRequestHeaders(
   return { ok: true };
 }
 
+function createPayloadTooLargeError(): Error & { statusCode: number } {
+  const err = new Error('Request payload exceeds maximum allowed size.') as Error & {
+    statusCode: number;
+  };
+  err.statusCode = 413;
+  return err;
+}
+
 function readRequestBody(req: http.IncomingMessage, maxBytes: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let total = 0;
     let settled = false;
+    let exceeded = false;
+
+    const declaredLength = Number(req.headers['content-length']);
+    if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+      exceeded = true;
+    }
 
     req.on('data', (chunk: Buffer) => {
       if (settled) {
@@ -98,14 +113,18 @@ function readRequestBody(req: http.IncomingMessage, maxBytes: number): Promise<s
       }
       total += chunk.length;
       if (total > maxBytes) {
-        settled = true;
-        const err = new Error('Request payload exceeds maximum allowed size.');
-        (err as Error & { statusCode?: number }).statusCode = 413;
-        req.destroy();
-        reject(err);
+        exceeded = true;
+        chunks.length = 0;
+        if (total > HARD_DRAIN_CAP_BYTES) {
+          settled = true;
+          req.pause();
+          reject(createPayloadTooLargeError());
+        }
         return;
       }
-      chunks.push(chunk);
+      if (!exceeded) {
+        chunks.push(chunk);
+      }
     });
 
     req.on('end', () => {
@@ -113,6 +132,10 @@ function readRequestBody(req: http.IncomingMessage, maxBytes: number): Promise<s
         return;
       }
       settled = true;
+      if (exceeded) {
+        reject(createPayloadTooLargeError());
+        return;
+      }
       resolve(Buffer.concat(chunks).toString('utf8'));
     });
 
@@ -126,18 +149,37 @@ function readRequestBody(req: http.IncomingMessage, maxBytes: number): Promise<s
   });
 }
 
-function sendHtml(res: http.ServerResponse, statusCode: number, html: string): void {
+function sendHtml(
+  res: http.ServerResponse,
+  statusCode: number,
+  html: string,
+  extraHeaders?: Record<string, string>
+): void {
   setSecurityHeaders(res);
-  res.statusCode = statusCode;
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  const headers: Record<string, string | number> = {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Content-Length': Buffer.byteLength(html, 'utf8'),
+    ...extraHeaders
+  };
+  res.writeHead(statusCode, headers);
   res.end(html);
 }
 
-function sendJson(res: http.ServerResponse, statusCode: number, payload: unknown): void {
+function sendJson(
+  res: http.ServerResponse,
+  statusCode: number,
+  payload: unknown,
+  extraHeaders?: Record<string, string>
+): void {
   setSecurityHeaders(res);
-  res.statusCode = statusCode;
-  res.setHeader('Content-Type', 'application/json; charset=utf-8');
-  res.end(`${JSON.stringify(payload, null, 2)}\n`);
+  const serialized = `${JSON.stringify(payload, null, 2)}\n`;
+  const headers: Record<string, string | number> = {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(serialized, 'utf8'),
+    ...extraHeaders
+  };
+  res.writeHead(statusCode, headers);
+  res.end(serialized);
 }
 
 interface DashboardModel {
@@ -470,11 +512,21 @@ export async function startRelayWebServer(
           ? err.statusCode
           : 500;
       const message = err instanceof Error ? err.message : 'Internal server error.';
-      sendHtml(
-        res,
-        statusCode,
-        `<!DOCTYPE html><html lang="en"><body><h1>Error ${statusCode}</h1><p>${escapeHtml(message)}</p></body></html>`
-      );
+      const extraHeaders = statusCode === 413 ? { Connection: 'close' } : undefined;
+      const wantsJson =
+        (req.headers['content-type'] ?? '').toLowerCase().includes('application/json') ||
+        (req.headers.accept ?? '').toLowerCase().includes('application/json');
+
+      if (wantsJson) {
+        sendJson(res, statusCode, { error: message }, extraHeaders);
+      } else {
+        sendHtml(
+          res,
+          statusCode,
+          `<!DOCTYPE html><html lang="en"><body><h1>Error ${statusCode}</h1><p>${escapeHtml(message)}</p></body></html>`,
+          extraHeaders
+        );
+      }
     }
   });
 

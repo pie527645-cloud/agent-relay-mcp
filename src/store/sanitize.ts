@@ -198,6 +198,18 @@ export function normalizeLeasePath(rawPath: string): string {
   return `${prefix}${cleanSegments.join('/')}`;
 }
 
+export function isCaseInsensitivePlatform(platform: NodeJS.Platform = process.platform): boolean {
+  return platform === 'win32' || platform === 'darwin';
+}
+
+export function toLeaseLookupKey(
+  rawOrNormalizedPath: string,
+  caseInsensitive: boolean = isCaseInsensitivePlatform()
+): string {
+  const normalized = normalizeLeasePath(rawOrNormalizedPath);
+  return caseInsensitive ? normalized.toLowerCase() : normalized;
+}
+
 export function validateTtlSeconds(rawTtl?: number): number {
   if (rawTtl === undefined) {
     return DEFAULT_LEASE_TTL_SECONDS;

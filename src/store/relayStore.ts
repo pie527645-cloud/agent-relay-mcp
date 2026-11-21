@@ -24,6 +24,7 @@ import type {
 } from '../types.js';
 import { atomicWriteJson, readJsonFile, withFileLock } from './lock.js';
 import {
+  isCaseInsensitivePlatform,
   normalizeLeasePath,
   resolveRelayDir,
   sanitizeChannelName,
@@ -33,6 +34,7 @@ import {
   sanitizeQuestionId,
   sanitizeTags,
   sanitizeTextContent,
+  toLeaseLookupKey,
   ValidationError,
   validateReadLimit,
   validateSinceSeq,
@@ -46,6 +48,30 @@ export class NotFoundError extends Error {
   }
 }
 
+function createEmptyLeaseMap(): Record<string, FileLease> {
+  return Object.create(null) as Record<string, FileLease>;
+}
+
+function setLeaseEntry(
+  leases: Record<string, FileLease>,
+  key: string,
+  value: FileLease
+): void {
+  Object.defineProperty(leases, key, {
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true
+  });
+}
+
+function getOwnLeaseEntry(
+  leases: Record<string, FileLease>,
+  key: string
+): FileLease | undefined {
+  return Object.hasOwn(leases, key) ? leases[key] : undefined;
+}
+
 export class RelayStore {
   public readonly baseDir: string;
   private readonly channelsDir: string;
@@ -54,6 +80,7 @@ export class RelayStore {
   private readonly inboxFilePath: string;
   private readonly lockTimeoutMs: number;
   private readonly lockStaleMs: number;
+  private readonly caseInsensitivePaths: boolean;
   private readonly now: () => number;
 
   constructor(options: RelayStoreOptions = {}) {
@@ -64,6 +91,7 @@ export class RelayStore {
     this.inboxFilePath = path.join(this.baseDir, 'inbox.json');
     this.lockTimeoutMs = options.lockTimeoutMs ?? 15_000;
     this.lockStaleMs = options.lockStaleMs ?? 15_000;
+    this.caseInsensitivePaths = options.caseInsensitivePaths ?? isCaseInsensitivePlatform();
     this.now = options.now ?? (() => Date.now());
   }
 
@@ -227,9 +255,46 @@ export class RelayStore {
     return summaries;
   }
 
+  private toLeaseKey(normalizedPath: string): string {
+    return toLeaseLookupKey(normalizedPath, this.caseInsensitivePaths);
+  }
+
+  private normalizeLoadedLeases(existingFile: LeasesFile | null): LeasesFile {
+    const map = createEmptyLeaseMap();
+    const rawLeases = existingFile?.leases;
+    if (rawLeases && typeof rawLeases === 'object') {
+      for (const rawKey of Object.keys(rawLeases)) {
+        if (!Object.hasOwn(rawLeases, rawKey)) {
+          continue;
+        }
+        const entry = rawLeases[rawKey];
+        if (!entry || typeof entry !== 'object' || typeof entry.path !== 'string') {
+          continue;
+        }
+        let lookupKey: string;
+        try {
+          lookupKey = this.toLeaseKey(entry.path);
+        } catch {
+          lookupKey = this.caseInsensitivePaths ? rawKey.toLowerCase() : rawKey;
+        }
+        setLeaseEntry(map, lookupKey, entry);
+      }
+    }
+    return { leases: map };
+  }
+
   private pruneExpiredLeases(leases: Record<string, FileLease>, nowMs: number): boolean {
     let mutated = false;
-    for (const [leaseKey, lease] of Object.entries(leases)) {
+    for (const leaseKey of Object.keys(leases)) {
+      if (!Object.hasOwn(leases, leaseKey)) {
+        continue;
+      }
+      const lease = leases[leaseKey];
+      if (!lease) {
+        delete leases[leaseKey];
+        mutated = true;
+        continue;
+      }
       const expiresMs = Date.parse(lease.expiresAt);
       if (!Number.isFinite(expiresMs) || expiresMs <= nowMs) {
         delete leases[leaseKey];
@@ -241,6 +306,7 @@ export class RelayStore {
 
   public async acquireFileLease(input: AcquireFileLeaseInput): Promise<AcquireFileLeaseResult> {
     const normalizedPath = normalizeLeasePath(input.path);
+    const leaseKey = this.toLeaseKey(normalizedPath);
     const owner = sanitizeIdentifier(input.owner, 'Lease owner', 128);
     const ttlSeconds = validateTtlSeconds(input.ttlSeconds);
 
@@ -250,10 +316,10 @@ export class RelayStore {
       const expiresIso = new Date(nowMs + ttlSeconds * 1000).toISOString();
 
       const existingFile = await readJsonFile<LeasesFile>(this.leasesFilePath);
-      const state: LeasesFile = existingFile ?? { leases: {} };
+      const state = this.normalizeLoadedLeases(existingFile);
       const pruned = this.pruneExpiredLeases(state.leases, nowMs);
 
-      const current = state.leases[normalizedPath];
+      const current = getOwnLeaseEntry(state.leases, leaseKey);
       if (current && current.owner !== owner) {
         if (pruned) {
           await atomicWriteJson(this.leasesFilePath, state);
@@ -261,15 +327,16 @@ export class RelayStore {
         return {
           acquired: false,
           renewed: false,
-          path: normalizedPath,
+          path: current.path,
           holder: current.owner,
           expiresAt: current.expiresAt
         };
       }
 
       const isRenewal = Boolean(current && current.owner === owner);
+      const canonicalPath = current ? current.path : normalizedPath;
       const updatedLease: FileLease = {
-        path: normalizedPath,
+        path: canonicalPath,
         owner,
         ttlSeconds,
         acquiredAt: current ? current.acquiredAt : nowIso,
@@ -277,13 +344,13 @@ export class RelayStore {
         expiresAt: expiresIso
       };
 
-      state.leases[normalizedPath] = updatedLease;
+      setLeaseEntry(state.leases, leaseKey, updatedLease);
       await atomicWriteJson(this.leasesFilePath, state);
 
       return {
         acquired: true,
         renewed: isRenewal,
-        path: normalizedPath,
+        path: canonicalPath,
         holder: owner,
         acquiredAt: updatedLease.acquiredAt,
         expiresAt: updatedLease.expiresAt,
@@ -294,16 +361,17 @@ export class RelayStore {
 
   public async releaseFileLease(input: ReleaseFileLeaseInput): Promise<ReleaseFileLeaseResult> {
     const normalizedPath = normalizeLeasePath(input.path);
+    const leaseKey = this.toLeaseKey(normalizedPath);
     const owner = sanitizeIdentifier(input.owner, 'Lease owner', 128);
 
     return this.withLock('leases', async () => {
       const nowMs = this.now();
       const existingFile = await readJsonFile<LeasesFile>(this.leasesFilePath);
-      const state: LeasesFile = existingFile ?? { leases: {} };
+      const state = this.normalizeLoadedLeases(existingFile);
 
-      const beforePrune = state.leases[normalizedPath];
+      const beforePrune = getOwnLeaseEntry(state.leases, leaseKey);
       const pruned = this.pruneExpiredLeases(state.leases, nowMs);
-      const active = state.leases[normalizedPath];
+      const active = getOwnLeaseEntry(state.leases, leaseKey);
 
       if (!active) {
         if (pruned) {
@@ -312,7 +380,7 @@ export class RelayStore {
         return {
           released: true,
           alreadyExpiredOrMissing: true,
-          path: normalizedPath,
+          path: beforePrune ? beforePrune.path : normalizedPath,
           reason: beforePrune ? 'Lease had already expired.' : 'No active lease existed for path.'
         };
       }
@@ -324,20 +392,22 @@ export class RelayStore {
         return {
           released: false,
           alreadyExpiredOrMissing: false,
-          path: normalizedPath,
+          path: active.path,
           holder: active.owner,
           expiresAt: active.expiresAt,
           reason: 'Lease is currently held by a different owner.'
         };
       }
 
-      delete state.leases[normalizedPath];
+      if (Object.hasOwn(state.leases, leaseKey)) {
+        delete state.leases[leaseKey];
+      }
       await atomicWriteJson(this.leasesFilePath, state);
 
       return {
         released: true,
         alreadyExpiredOrMissing: false,
-        path: normalizedPath
+        path: active.path
       };
     });
   }
@@ -349,11 +419,21 @@ export class RelayStore {
       if (!existingFile) {
         return [];
       }
-      const pruned = this.pruneExpiredLeases(existingFile.leases, nowMs);
+      const state = this.normalizeLoadedLeases(existingFile);
+      const pruned = this.pruneExpiredLeases(state.leases, nowMs);
       if (pruned) {
-        await atomicWriteJson(this.leasesFilePath, existingFile);
+        await atomicWriteJson(this.leasesFilePath, state);
       }
-      return Object.values(existingFile.leases).sort((a, b) => a.path.localeCompare(b.path));
+      const result: FileLease[] = [];
+      for (const key of Object.keys(state.leases)) {
+        if (Object.hasOwn(state.leases, key)) {
+          const item = state.leases[key];
+          if (item) {
+            result.push(item);
+          }
+        }
+      }
+      return result.sort((a, b) => a.path.localeCompare(b.path));
     });
   }
 
