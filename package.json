@@ -1,0 +1,52 @@
+{
+  "name": "@pie527645-cloud/agent-relay-mcp",
+  "version": "0.1.0",
+  "description": "Local-first cross-session coding agent bridge, cooperative file-lease guard, and non-blocking human question inbox via MCP and CLI.",
+  "type": "module",
+  "license": "MIT",
+  "author": "pie527645-cloud",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pie527645-cloud/agent-relay-mcp.git"
+  },
+  "engines": {
+    "node": ">=20.18.1"
+  },
+  "bin": {
+    "agent-relay": "./dist/cli.js",
+    "agent-relay-mcp": "./dist/mcp.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "lint": "tsc -p tsconfig.test.json --noEmit",
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && tsc -p tsconfig.test.json && node --test dist-test/tests/sanitize.test.js dist-test/tests/lock-concurrency.test.js dist-test/tests/store.test.js dist-test/tests/web.test.js dist-test/tests/mcp-cli.test.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.19",
+    "typescript": "^5.7.3"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "multi-agent",
+    "file-lease",
+    "agent-coordination",
+    "human-in-the-loop",
+    "local-first"
+  ]
+}
