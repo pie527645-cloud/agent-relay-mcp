@@ -329,9 +329,17 @@ export async function runCli(argv: string[], io: CliIo = defaultIo): Promise<num
           const shutdown = () => {
             process.off('SIGINT', shutdown);
             process.off('SIGTERM', shutdown);
+            const forceExit = setTimeout(() => process.exit(1), 10_000);
+            forceExit.unref();
             running.close().then(
-              () => resolve(),
-              () => resolve()
+              () => {
+                clearTimeout(forceExit);
+                resolve();
+              },
+              () => {
+                clearTimeout(forceExit);
+                resolve();
+              }
             );
           };
           process.on('SIGINT', shutdown);
